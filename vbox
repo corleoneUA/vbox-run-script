@@ -1,0 +1,376 @@
+#! /bin/sh
+# vbox   Startup script for VirtualBox Virtual Machines
+
+### BEGIN INIT INFO
+# Provides:          vbox
+# Required-Start:    vboxdrv $local_fs
+# Required-Stop:     vboxdrv $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Description:       Controls VirtualBox sessions
+### END INIT INFO
+
+
+
+######## ==>VARS<== #######################################################################
+# INITIAL CONFIGURATION
+VBOXDIR="/home/vbox"
+VM_USER="vbox"
+backupdir="/backup"
+
+echo $@ | grep -o  backupdir >/dev/null && for i in "$@" ; do
+pathbackup=`echo $i |  grep  backupdir | sed 's/backupdir://'`
+if  [ ! -z $pathbackup ]; then  backupdir=$pathbackup  ; fi
+done
+
+#####################################
+
+
+SU="su $VM_USER -c"
+VBOXMANAGE="VBoxManage -nologo"
+#################
+virtm=`$SU "$VBOXMANAGE list vms" | cut -d\" -f2`
+#################
+mkdir -p "$backupdir"/vboxbackup && chown $VM_USER "$backupdir"/vboxbackup
+###############################################################################
+# FUNCTIONS
+manual() {
+  echo  "
+    MANUAL vbox init script
+
+
+    Do this first
+
+    Open  script
+    nano /<path>/vbox
+    change VARS for your configuration(in init script), for example
+
+    VBOXDIR="/home/vbox"
+    VM_USER="vbox"
+    backupdir="/backup"
+
+
+    ln -s /<path>/vbox /etc/init.d/
+    chmod +x /<path>/vbox
+    update-rc.d vboxdrv defaults #or your own timings
+
+    Use crontab, for ex
+
+    1 1 * * 7  /etc/init.d/vbox backuplist /home/vbox/vbox.mainbackup 3
+    	or
+    1 1 * * 7  /etc/init.d/vbox backuplist /home/vbox/vbox.mainbackup 3 | mutt -s '"'SOMETHING has been doing'"' admin@example.com
+    For last, you need postfix and mutt to send notes!!!
+
+    Usage
+
+    1) /etc/init.d/vbox start       - to start VMs from /<path>/vbox.autostart
+    2) /etc/init.d/vbox stop        - to stop all running VMs
+    3) /etc/init.d/vbox status      - to show all running VMs
+    4) /etc/init.d/vbox vms         - to show all VMs ingeneral
+    5) /etc/init.d/vbox backup <copies>     - to backup  VMs that are running (<copies> is count of keeping archive copies, exclude copy will be done)
+    6) /etc/init.d/vbox backupall <copies>   - to backup all  VMs (<copies> is count of keeping archive copies, exclude copy will be done)
+    7) /etc/init.d/vbox backuplist /<path>/vbox.<list> <copies>  or
+       /etc/init.d/vbox backuplist <VMname> <copies>        - to backup 1 VM or VMs from list (<copies> is count of keeping archive copies, exclude copy will be done)
+    8) /etc/init.d/vbox start-vm <VMname>           - to start VM
+    9) /etc/init.d/vbox stop-vm <VMname>            - to stop VM
+    10) /etc/init.d/vbox savestate-vm <VMname>      - to save state of VM
+    11) /etc/init.d/vbox poweroff-vm <VMname>       - to poweroff VM
+    **) add parameter "backupdir:/path" to change backupdir
+     *Re-write(11.12.2015) by Max Krukov <admin@itmk.com.ua>
+  " | less
+}
+
+check_par() {
+  if [ -z $1 ]; then
+    manual
+    exit 1
+  fi
+}
+
+log_action_msg() {
+  echo $1
+}
+
+# Check for running machines every few seconds; return when all machines are
+# down
+wait_for_closing_machines() {
+  RUNNING_MACHINES=`$SU "$VBOXMANAGE list runningvms" | wc -l`
+  if [ $RUNNING_MACHINES != 0 ]; then
+    sleep 5
+    echo "    ..waiting for VM shut-down to complete.."
+    wait_for_closing_machines
+  fi
+}
+
+startf() {
+  if [ -f "$VBOXDIR"/vbox.autostart ]; then
+    cat "$VBOXDIR"/vbox.autostart  | while read VM; do
+    check=`$SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | grep "$VM"`
+    if  [  -z $check ]; then
+      log_action_msg "Starting VM: $VM ..."
+      $SU "$VBOXMANAGE startvm "$VM" --type headless"
+    else
+      log_action_msg "$VM  ===>  is working now"
+  fi
+  done
+fi
+}
+
+stopf() {
+  ## NOTE: this stops all running VM's. Not just the ones listed in the config
+  ## NOTE2: used controllvm 'savestate' instead of 'acpipowerbutton' to avoid hang 
+  ##        with guest OS "..are you sure?" GUI prompts with acpipowerbutton
+  $SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | while read VM; do
+    log_action_msg "Saving state and powering off VM: $VM ..."
+    $SU "$VBOXMANAGE controlvm "$VM" savestate" 2>&1
+  done
+  wait_for_closing_machines
+}
+
+webvbox() {
+  service vboxweb-service stop
+  service vboxweb-service start
+}
+
+delete() {
+
+  prefix="/backup/vboxbackup"
+  rm -f /tmp/deletesh
+  if [ -z $1 ]; then exit 1 ; fi
+  if [ -z $2 ]; then set $1 "1" ; fi
+  echo "==========> $1  [ $2 copy(s) for archive ]<============"
+  if [ $2 == 0  ]; then
+    eval    rm -rv "$prefix/$1*"
+  else
+    for i in `seq 1 $2`;
+      do
+        ls -1rt $prefix  | grep $1 | tail -"$i" | head -1  >> /tmp/deletesh
+      done 2>/dev/null
+    for f in `ls -1rt $prefix  | grep $1`;
+      do
+        a=`sort -u /tmp/deletesh | grep $f` 
+          if [  -z $a ] ; then
+            rm -rv $prefix/$f
+          fi 2>/dev/null
+      done 2>/dev/null
+  fi 2>/dev/null
+}
+
+snapshot_merge() {
+
+  for i in $($VBOXMANAGE snapshot "$1" list | awk '{print $2}'); do
+    echo $i
+    $VBOXMANAGE snapshot "$1" delete $i;
+  done
+}
+
+################################################################################
+# RUN
+case "$1" in
+
+start)
+startf
+webvbox
+;;
+
+stop)
+stopf
+;;
+
+start-vm)
+
+check_par $2
+
+run=`$SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | grep $2`
+ext=`$SU "$VBOXMANAGE list vms" | cut -d\" -f2 | grep $2`
+
+if [ [ $run != $2 -o -z $run ]   -a  $ext = $2  ]; then
+  echo "Starting VM: $2 ..."
+  $SU "$VBOXMANAGE startvm "$2" --type headless"
+elif [ $run = $2  ]; then
+  echo  "VM: $2 has already started"
+else
+  echo  "VM: $2 is not exist!!!"
+fi 2>/dev/null
+
+;;
+
+stop-vm)
+
+check_par $2
+run=`$SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | grep $2`
+ext=`$SU "$VBOXMANAGE list vms" | cut -d\" -f2 | grep $2`
+
+if [ $run = $2  ]; then
+  echo "Stopping VM: $2 ..."
+  $SU "$VBOXMANAGE controlvm "$2" acpipowerbutton" 2>&1
+  sleep 1
+  $SU "$VBOXMANAGE controlvm "$2" acpipowerbutton" 2>&1
+elif [ $ext = $2 ]; then
+  echo  "VM: $2 has already stoped"
+else
+  echo  "VM: $2 is not exist!!!"
+  fi 2>/dev/null
+;;
+
+savestate-vm)
+
+check_par $2
+
+run=`$SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | grep $2`
+ext=`$SU "$VBOXMANAGE list vms" | cut -d\" -f2 | grep $2`
+
+if [ $run = $2  ]; then
+  echo "Saving state and powering off VM: $2 ..."
+  $SU "$VBOXMANAGE controlvm "$2" savestate" 2>&1
+elif [ $ext = $2 ]; then
+  echo  "VM: $2 has already stoped"
+else
+  echo  "VM: $2 is not exist!!!"
+  fi 2>/dev/null
+;;
+
+poweroff-vm)
+
+check_par $2
+
+run=`$SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | grep $2`
+ext=`$SU "$VBOXMANAGE list vms" | cut -d\" -f2 | grep $2`
+
+if [ $run = $2  ]; then
+  echo "Powering off VM: $2 ..."
+  $SU "$VBOXMANAGE controlvm "$2" poweroff"
+elif [ $ext = $2 ]; then
+  echo  "VM: $2 has already stoped"
+else
+  echo  "VM: $2 is not exist!!!"
+fi 2>/dev/null
+;;
+
+status)
+echo "The following virtual machines are currently running:"
+$SU "$VBOXMANAGE list runningvms" | while read VM; do
+  echo -n "$VM ("
+  echo -n `$SU "VBoxManage showvminfo ${VM%% *}|grep -m 1 Name:|sed -e 's/^Name:s*//g'"`
+  echo ')'
+done
+;;
+
+backupall)
+DT_START=$(date +%s)
+###
+$SU "$VBOXMANAGE list vms" | cut -d\" -f2 | while read VM; do
+  delete $VM $2
+  log_action_msg "$VM ====== $(date +%F_%H:%M:%S)  [STARTED]"
+  log_action_msg "Snapshot merge of: $VM"
+  log_action_msg "Saving state and powering off VM: $VM ..."
+  $SU "$VBOXMANAGE controlvm "$VM" savestate" 2>&1
+  log_action_msg "Export virtmachine $VM ..."
+  $SU "$VBOXMANAGE export "$VM" --output "$backupdir"/vboxbackup/"$VM"'_'$(date +%F).ova" 2>&1
+  log_action_msg "Snapshot merge of: $VM"
+  snapshot_merge "$VM"
+  log_action_msg "Starting VM: $VM ..."
+  $SU "$VBOXMANAGE startvm "$VM" --type headless"  
+  log_action_msg " [ $VM ] ====== $(date +%F_%H:%M:%S)"
+done
+#webvbox  >/dev/null 2>&1
+###
+DT_END=$(date +%s)
+Time3=$(expr $DT_END - $DT_START)
+Hour=$(( $Time3/3600 ))
+Min=$(( $(( $Time3-$Hour*3600 ))/60 ))
+Sec=$(( $Time3-$(( $Hour*3600+$Min*60 )) ))
+echo "[DONE] Total time: [ $Hour:$Min:$Sec ]"
+;;
+
+backup)
+DT_START=$(date +%s)
+###
+$SU "$VBOXMANAGE list runningvms" | cut -d\" -f2 | while read VM; do
+  delete $VM $2
+  log_action_msg "$VM ====== $(date +%F_%H:%M:%S)  [STARTED]"
+  log_action_msg "Snapshot merge of: $VM"
+  log_action_msg "Saving state and powering off VM: $VM ..."
+  $SU "$VBOXMANAGE controlvm "$VM" savestate" 2>&1
+  log_action_msg "Export virtmachine $VM ..."
+  $SU "$VBOXMANAGE export "$VM" --output "$backupdir"/vboxbackup/"$VM"'_'$(date +%F_%H:%M).ova" 2>&1
+  log_action_msg "Snapshot merge of: $VM"
+  snapshot_merge "$VM"
+  log_action_msg "Starting VM: $VM ..."
+  $SU "$VBOXMANAGE startvm "$VM" --type headless"  
+  log_action_msg " [ $VM ] ====== $(date +%F_%H:%M:%S)"
+done
+#webvbox  >/dev/null 2>&1
+###
+DT_END=$(date +%s)
+Time3=$(expr $DT_END - $DT_START)
+Hour=$(( $Time3/3600 ))
+Min=$(( $(( $Time3-$Hour*3600 ))/60 ))
+Sec=$(( $Time3-$(( $Hour*3600+$Min*60 )) ))
+echo "[DONE] Total time: [ $Hour:$Min:$Sec ]"
+
+;;
+
+
+backuplist)
+
+DT_START=$(date +%s)
+##########################
+if [ -f "$2" ]; then
+  cat "$2" | cut -d\" -f2 | while read VM; do
+    delete $VM $3
+    log_action_msg "$VM ====== $(date +%F_%H:%M:%S)  [STARTED]"
+    log_action_msg "Saving state and powering off VM: $VM ..."
+    $SU "$VBOXMANAGE controlvm "$VM" savestate" 2>&1
+    log_action_msg "Export virtmachine $VM ..."
+    $SU "$VBOXMANAGE export "$VM" --output "$backupdir"/vboxbackup/"$VM"'_'$(date +%F_%H:%M).ova" 2>&1
+    log_action_msg "Snapshot merge of: $VM"
+    snapshot_merge "$VM"
+    log_action_msg "Starting VM: $VM ..."
+    $SU "$VBOXMANAGE startvm "$VM" --type headless"  
+    log_action_msg " [ $VM ] ====== $(date +%F_%H:%M:%S)"
+	done
+#webvbox  >/dev/null 2>&1
+elif [ ! -z $(echo $virtm | grep $2 | sed 's/ //g' | sed 's/ //g') ]; then
+	 delete $2 $3
+    log_action_msg " [ $2 ] ====== $(date +%F_%H:%M:%S) [STARTED]"
+    log_action_msg "Saving state and powering off VM: $2 ..."
+    $SU "$VBOXMANAGE controlvm "$2" savestate" 2>&1
+    log_action_msg "Export virtmachine $2 ..."
+    $SU "$VBOXMANAGE export "$2" --output "$backupdir"/vboxbackup/"$2"'_'$(date +%F_%H:%M).ova" 2>&1
+    log_action_msg "Snapshot merge of: $2"
+    snapshot_merge "$2"
+    log_action_msg "Starting VM: $VM ..."
+    $SU "$VBOXMANAGE startvm "$2" --type headless" 
+    log_action_msg " [ $2 ] ====== $(date +%F_%H:%M:%S)  "
+	# webvbox >/dev/null 2>&1
+else
+  log_action_msg "List is not exist"
+fi
+###############################
+DT_END=$(date +%s)
+Time3=$(expr $DT_END - $DT_START)
+Hour=$(( $Time3/3600 ))
+Min=$(( $(( $Time3-$Hour*3600 ))/60 ))
+Sec=$(( $Time3-$(( $Hour*3600+$Min*60 )) ))
+echo "[DONE] Total time: [ $Hour:$Min:$Sec ]"
+
+;;
+
+vms)
+	echo $virtm
+;;
+
+snapshot)
+  check_par $2
+  log_action_msg "Making snapshot of: $2 ..."
+  $SU "$VBOXMANAGE snapshot "$2" take $(date +%F_%H:%M:%S)" 2>&1
+;;
+
+*)
+echo "Usage: $0 {start|stop|status|vms|backup|backuplist<list>|backupall|start-vm<VMname>|stop-vm<VMname>|savestate-vm<VM_name>|poweroff-vm<VMname>|snapshot<VM>}"
+manual
+exit 3
+esac
+
+exit 0
